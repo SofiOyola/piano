@@ -1,4 +1,12 @@
+import os
+import sys
 import warnings
+
+# Evitar conflicto entre TensorFlow y Protobuf al importar MediaPipe Hands
+os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+sys.modules["tensorflow"] = None
+
 # Suprimir advertencia protobuf temprano
 warnings.filterwarnings("ignore", message=".*SymbolDatabase.GetPrototype.*")
 
