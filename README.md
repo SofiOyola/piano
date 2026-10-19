@@ -1,46 +1,29 @@
-# Piano con las Manos — Postura Real de Piano ("Araña Acostada")
+# Piano con las Manos — Mano Horizontal y Pentagrama en Vivo
 
 Resumen
 -------
-Este proyecto implementa un **piano virtual** controlado por las manos usando visión por computador (**OpenCV + MediaPipe Hands**) y **Pygame** para la reproducción de samples de audio (`.mp3` / `.wav`), guiado a partir de [adiacla/piano](https://github.com/adiacla/piano.git) y adaptado específicamente para permitir **apoyar las manos sobre una superficie/mesa en postura de piano real ("araña acostada")** sin que el apoyo afecte la detección ni dispare notas falsas.
+Este proyecto implementa un **piano virtual** controlado con las manos usando visión por computador (**OpenCV + MediaPipe Hands**) y **Pygame** para reproducir samples de piano (`.mp3` / `.wav`).
 
-¿Cómo resuelve el problema de las manos apoyadas ("Araña Acostada")?
---------------------------------------------------------------------
-En un detector básico que solo mide el cambio vertical absoluto (`dy`) de las puntas en un solo frame:
-1. Al bajar o apoyar la mano entera sobre la mesa, todas las notas se disparan por accidente.
-2. Con la mano acostada horizontalmente (palma hacia abajo y dedos arqueados en forma de araña), el recorrido vertical de cada dedo es corto y las sombras bajo la mano dificultan la detección o invierten la clasificación `Left`/`Right` de MediaPipe.
+Características principales
+---------------------------
+1. **Detección en postura de mano horizontal ("araña acostada")**:
+   - Ordena automáticamente las 5 puntas de cada mano de **izquierda a derecha en el eje X**, evitando que las líneas o los dedos se crucen cuando colocas la mano horizontalmente con la palma hacia abajo.
+   - Al **bajar un dedo**, suena inmediatamente su nota asignada. Si mueves o apoyas toda la mano en bloque, se compensa el movimiento común para evitar que suenen todas las notas por accidente.
+2. **Notación de Piano Tradicional (`Do`, `Re`, `Mi`, `Fa`, `Sol`, `La`, `Si`)**:
+   - En lugar de cifrado inglés de guitarra (`C, D, E...`), muestra los nombres clásicos de piano en español directamente debajo de cada dedo:
+     - **Mano 1** (de izquierda a derecha): `Do`, `Re`, `Mi`, `Fa`, `Sol`
+     - **Mano 2** (de izquierda a derecha): `La`, `Si`, `Do`, `Re`, `Mi`
+3. **Pentagrama en Tiempo Real (Esquina Superior Derecha)**:
+   - Muestra un pentagrama musical con sus 5 líneas en Clave de Sol en la esquina superior derecha de la pantalla.
+   - Cada vez que tocas una nota, se ilumina un **círculo (cabeza de nota musical)** exactamente en la línea o espacio correspondiente del pentagrama (incluyendo la línea adicional inferior para el `Do` central).
 
-Esta implementación incorpora **4 mejoras biomecánicas y de visión**:
-
-1. **Compensación del Puente de Soporte (Nudillos `MCP` `[2, 5, 9, 13, 17]`)**:
-   - El sistema rastrea el "cuerpo de la araña" (el puente formado por la muñeca y los nudillos base `MCP`).
-   - Si el usuario baja toda la mano para apoyarla o acomodarla sobre la mesa, el desplazamiento vertical del puente se resta automáticamente del movimiento de las puntas (`dy_neto`). Así puedes apoyar y descansar las manos sin activar notas por error.
-2. **Detección Articular Relativa (`TIP` respecto a `MCP` y `PIP`)**:
-   - Cuando la mano está apoyada como araña, pulsar una tecla implica flexionar la punta del dedo (`4, 8, 12, 16, 20`) hacia la superficie respecto a su nudillo (`2, 5, 9, 13, 17`) y articulación media (`3, 6, 10, 14, 18`), incluso cuando el movimiento en píxeles es pequeño por la perspectiva frontal o diagonal de la cámara.
-3. **Máquina de Estados con Histéresis (`REPOSO` ↔ `PRESIONADO`) y Ventana Multi-frame**:
-   - Evalúa la articulación en una ventana corta de frames y mantiene una línea base adaptativa de reposo (`baseline_rel_y`). Una vez que un dedo toca la mesa y suena la nota, puede quedarse apoyado sin re-disparar el sonido hasta que se levante ligeramente.
-4. **Realce de Contraste Local (CLAHE) + Ordenamiento Espacial Inmune a Inversión**:
-   - Mejora la iluminación bajo el arco de los dedos apoyados y ordena las manos por su geometría horizontal en pantalla para evitar que MediaPipe confunda la mano izquierda con la derecha cuando las palmas miran hacia abajo.
-
-Mapeo de Notas (10 Dedos)
--------------------------
-De izquierda a derecha:
-- **Mano Izquierda** (Meñique → Pulgar): `E5`, `D5`, `C5`, `B4`, `A4`
-- **Mano Derecha** (Pulgar → Meñique): `C4`, `D4`, `E4`, `F4`, `G4`
-
-Requisitos e Instalación
-------------------------
+Instalación y Ejecución
+-----------------------
 ```bash
 pip install -r requirements.txt
-```
-
-Ejecución
----------
-```bash
 python piano.py
 ```
 
-### Controles en tiempo real (en la ventana de video)
-- **`+` / `-`**: Aumentar o disminuir la sensibilidad de pulsación según la distancia a la cámara.
-- **`M`**: Alternar modo espejo (flip horizontal).
+### Controles en ventana
+- **`+` / `-`**: Aumentar o disminuir la sensibilidad al bajar el dedo.
 - **`ESC`**: Salir del programa.
