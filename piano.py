@@ -30,12 +30,7 @@ except Exception:
 # --------------------------
 # CONFIGURACIÓN DE NOTAS (Formato Piano: Do, Re, Mi, Fa, Sol, La, Si)
 # --------------------------
-# Archivos de audio (en carpeta sonidos/) ordenados de izquierda a derecha como en un piano:
-# Mano 1 (5 dedos de izq a der): Do, Re, Mi, Fa, Sol (C4..G4)
-# Mano 2 (5 dedos de izq a der): La, Si, Do, Re, Mi  (A4..E5)
 archivos_por_dedo = ['C4', 'D4', 'E4', 'F4', 'G4', 'A4', 'B4', 'C5', 'D5', 'E5']
-
-# Nombres en formato piano tradicional para mostrar en los dedos y en el pentagrama
 nombres_piano_por_dedo = ['Do', 'Re', 'Mi', 'Fa', 'Sol', 'La', 'Si', 'Do', 'Re', 'Mi']
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -125,40 +120,52 @@ hands = mp_hands.Hands(
     static_image_mode=False,
     max_num_hands=2,
     model_complexity=1,
-    min_detection_confidence=0.55,
-    min_tracking_confidence=0.50
+    min_detection_confidence=0.65,
+    min_tracking_confidence=0.65
 )
 
-# Índices de las 5 puntas y sus articulaciones inmediatas
-FINGER_TIPS = [4, 8, 12, 16, 20]
-FINGER_PIPS = [3, 6, 10, 14, 18]
+# Índices anatómicos fijos de las 5 puntas (NUNCA se reordenan por X cuadro a cuadro
+# para evitar que dos dedos cercanos intercambien identidad y se aloquen las notas)
+FINGER_TIPS = [4, 8, 12, 16, 20]   # Pulgar, Índice, Medio, Anular, Meñique
+PALM_LANDMARKS = [0, 5, 9, 13, 17] # Muñeca y nudillos base (para medir quietud de la mano)
 
 # --------------------------
-# DETECCIÓN DE PULSACIÓN PARA MANO HORIZONTAL / ARAÑA
+# PARÁMETROS DE DETECCIÓN Y MODO STANDBY (MANO ACOSTADA / DERECHA)
 # --------------------------
-# En postura horizontal (araña), los 5 dedos de cada mano se ordenan espacialmente
-# de izquierda a derecha en X para que las notas nunca se crucen ni se inviertan.
-# Cuando un dedo baja (dy > UMBRAL), restamos el movimiento mínimo del resto de la mano:
-#   - Si toda la mano baja al apoyarse, todos los dedos bajan igual -> NO suena por error.
-#   - Si bajas un dedo para tocar una nota, ese dedo baja más que el resto -> SUENA inmediato.
+alpha_smooth = 0.55            # Suavizado EMA para eliminar temblores en postura horizontal
+UMBRAL_VEL_DEDO = 0.024        # Velocidad de bajada en ventana corta (3 frames)
+UMBRAL_BAJADA_STANDBY = 0.038  # Distancia que debe bajar el dedo desde su posición de Standby
+MAX_MOV_PALMA = 0.014          # Si la palma/mano entera se mueve más que esto, queda en Standby
+COOLDOWN = 0.28                # Tiempo mínimo entre toques del mismo dedo (segundos)
+DURACION_NOTA_VISUAL = 0.70    # Tiempo que permanece iluminado el círculo en el pentagrama
 
-alpha_smooth = 0.65            # Suavizado EMA de posición
-UMBRAL_MOV_REL = 0.014         # Umbral de bajada por dedo (sensible para mano horizontal)
-COOLDOWN = 0.20                # Segundos entre repeticiones del mismo dedo
-DURACION_NOTA_VISUAL = 0.65    # Tiempo (s) que el círculo permanece iluminado en el pentagrama
-
+# Estado por dedo (10 dedos)
 prev_y = [None] * 10
 prev_x = [None] * 10
-hist_y = [deque(maxlen=3) for _ in range(10)]
-dedo_abajo = [False] * 10
+baseline_y = [None] * 10       # Altura de reposo (Standby) de cada dedo
+hist_y = [deque(maxlen=4) for _ in range(10)]
+dedo_presionado = [False] * 10
+frames_estables = [0] * 10     # Cuántos frames lleva el dedo estable tras aparecer o mover la mano
 last_play = {i: 0.0 for i in range(10)}
 ultimo_trigger_visual = {i: 0.0 for i in range(10)}
+
+# Estado por mano (0: mano principal/izq, 1: mano secundaria/der)
+prev_palm_pos = [None, None]
+orden_invertido_mano = [None, None]  # Bloquea el orden de los 5 dedos para que no salten
 
 def reset_finger(idx):
     prev_y[idx] = None
     prev_x[idx] = None
+    baseline_y[idx] = None
     hist_y[idx].clear()
-    dedo_abajo[idx] = False
+    dedo_presionado[idx] = False
+    frames_estables[idx] = 0
+
+def reset_hand(mano_slot):
+    prev_palm_pos[mano_slot] = None
+    orden_invertido_mano[mano_slot] = None
+    for i in range(mano_slot * 5, mano_slot * 5 + 5):
+        reset_finger(i)
 
 def tocar_sonido_idx(idx):
     if idx not in sonidos:
@@ -176,95 +183,89 @@ def tocar_sonido_idx(idx):
         return False
 
 # --------------------------
-# OBTENER LAS PUNTAS ORDENADAS DE IZQUIERDA A DERECHA EN HORIZONTAL
+# EXTRACCIÓN DE DEDOS CON IDENTIDAD ANATÓMICA FIJA (SIN INTERCAMBIOS)
 # --------------------------
-def extraer_5_puntas_ordenadas_x(lm, frame_width, frame_height):
+def extraer_mano_estable(lm, mano_slot, frame_width, frame_height):
     """
-    Extrae las 5 puntas de una mano y las ordena de IZQUIERDA a DERECHA en pantalla (eje X).
-    Esto evita que MediaPipe cruce los dedos o ponga 'Do' debajo de 'Mi' cuando la mano
-    se coloca horizontalmente o en forma de araña con la palma hacia abajo.
+    Extrae las 5 puntas usando sus IDs anatómicos fijos [4, 8, 12, 16, 20].
+    A diferencia del ordenamiento por X cuadro a cuadro, cada nota permanece atada
+    estrictamente a su dedo físico para que al acostar la mano las notas NUNCA
+    intercambien lugar ni se disparen solas.
     """
-    puntas = []
-    for k in range(5):
-        tip_id = FINGER_TIPS[k]
-        pip_id = FINGER_PIPS[k]
+    # Centro de la palma (muñeca + nudillos MCP) para saber si toda la mano se está moviendo
+    palm_x = float(np.mean([lm.landmark[p].x for p in PALM_LANDMARKS]))
+    palm_y = float(np.mean([lm.landmark[p].y for p in PALM_LANDMARKS]))
+
+    # Determinar una sola vez al entrar la mano si el pulgar (4) está a la derecha del meñique (20)
+    # para asignar Do->Re->Mi->Fa->Sol de izquierda a derecha sin cambiarlo mientras se mueve.
+    thumb_x = lm.landmark[4].x
+    pinky_x = lm.landmark[20].x
+    if orden_invertido_mano[mano_slot] is None:
+        orden_invertido_mano[mano_slot] = (thumb_x > pinky_x)
+    else:
+        # Solo actualizar si hay una diferencia amplia y clara (evita parpadeos cuando está acostada)
+        if (thumb_x - pinky_x) > 0.12:
+            orden_invertido_mano[mano_slot] = True
+        elif (pinky_x - thumb_x) > 0.12:
+            orden_invertido_mano[mano_slot] = False
+
+    tips_order = list(reversed(FINGER_TIPS)) if orden_invertido_mano[mano_slot] else list(FINGER_TIPS)
+
+    dedos = []
+    for tip_id in tips_order:
         x_norm = lm.landmark[tip_id].x
         y_norm = lm.landmark[tip_id].y
-        x_px = int(x_norm * frame_width)
-        y_px = int(y_norm * frame_height)
-        pip_px = (int(lm.landmark[pip_id].x * frame_width), int(lm.landmark[pip_id].y * frame_height))
-        puntas.append({
+        dedos.append({
             "x_norm": x_norm,
             "y_norm": y_norm,
-            "x_px": x_px,
-            "y_px": y_px,
-            "pip_px": pip_px
+            "x_px": int(x_norm * frame_width),
+            "y_px": int(y_norm * frame_height),
         })
 
-    # Ordenar estrictamente de izquierda a derecha en X
-    puntas.sort(key=lambda p: p["x_norm"])
-    return puntas
+    return dedos, (palm_x, palm_y)
 
-def obtener_tips_ordenados(results, frame_width, frame_height):
-    """
-    Retorna lista de 10 entradas (una por dedo).
-    - Si hay 1 mano en cámara: usa los primeros 5 dedos (Do, Re, Mi, Fa, Sol) de izq a der.
-    - Si hay 2 manos en cámara:
-        Mano izquierda en pantalla -> Do, Re, Mi, Fa, Sol (índices 0..4)
-        Mano derecha en pantalla   -> La, Si, Do, Re, Mi  (índices 5..9)
-    """
+def obtener_manos_estables(results, frame_width, frame_height):
     if not results.multi_hand_landmarks:
-        return [None] * 10
+        return [None] * 10, [None, None]
 
-    manos = []
+    manos_raw = []
     for lm in results.multi_hand_landmarks:
-        cx = float(np.mean([lm.landmark[t].x for t in FINGER_TIPS]))
-        manos.append((cx, lm))
+        cx = float(np.mean([lm.landmark[p].x for p in PALM_LANDMARKS]))
+        manos_raw.append((cx, lm))
 
-    # Ordenar las manos detectadas de izquierda a derecha en pantalla
-    manos.sort(key=lambda item: item[0])
+    manos_raw.sort(key=lambda item: item[0])
 
     salida = [None] * 10
-    if len(manos) == 1:
-        # Con 1 mano en escena, mapeamos a Do, Re, Mi, Fa, Sol (0..4)
-        puntas_m1 = extraer_5_puntas_ordenadas_x(manos[0][1], frame_width, frame_height)
-        for j in range(5):
-            salida[j] = puntas_m1[j]
-    else:
-        # Mano más a la izquierda -> 0..4 (Do, Re, Mi, Fa, Sol)
-        puntas_m1 = extraer_5_puntas_ordenadas_x(manos[0][1], frame_width, frame_height)
-        # Mano más a la derecha -> 5..9 (La, Si, Do, Re, Mi)
-        puntas_m2 = extraer_5_puntas_ordenadas_x(manos[1][1], frame_width, frame_height)
-        for j in range(5):
-            salida[j] = puntas_m1[j]
-            salida[j + 5] = puntas_m2[j]
+    palmas = [None, None]
 
-    return salida
+    if len(manos_raw) >= 1:
+        dedos_0, palma_0 = extraer_mano_estable(manos_raw[0][1], 0, frame_width, frame_height)
+        for j in range(5):
+            salida[j] = dedos_0[j]
+        palmas[0] = palma_0
+    else:
+        reset_hand(0)
+
+    if len(manos_raw) >= 2:
+        dedos_1, palma_1 = extraer_mano_estable(manos_raw[1][1], 1, frame_width, frame_height)
+        for j in range(5):
+            salida[j + 5] = dedos_1[j]
+        palmas[1] = palma_1
+    else:
+        reset_hand(1)
+
+    return salida, palmas
 
 # --------------------------
 # PENTAGRAMA EN LA ESQUINA SUPERIOR DERECHA
 # --------------------------
 def dibujar_pentagrama(frame, ahora):
     """
-    Dibuja un pentagrama musical en la parte superior derecha de la pantalla
-    y muestra un círculo sobre la línea o espacio exacto de la nota que se está tocando.
-
-    Posiciones en Clave de Sol (en medios pasos desde la 5ª línea superior):
-      Línea 5 (arriba) : paso 0  (Fa5)
-      Espacio 4        : paso 1  -> Mi (E5, dedo 9)
-      Línea 4          : paso 2  -> Re (D5, dedo 8)
-      Espacio 3        : paso 3  -> Do (C5, dedo 7)
-      Línea 3 (central): paso 4  -> Si (B4, dedo 6)
-      Espacio 2        : paso 5  -> La (A4, dedo 5)
-      Línea 2          : paso 6  -> Sol (G4, dedo 4)
-      Espacio 1        : paso 7  -> Fa (F4, dedo 3)
-      Línea 1 (abajo)  : paso 8  -> Mi (E4, dedo 2)
-      Espacio inferior : paso 9  -> Re (D4, dedo 1)
-      Línea adic. inf. : paso 10 -> Do (C4, dedo 0)
+    Dibuja el pentagrama en la parte superior derecha con un círculo en la nota
+    que se está tocando en ese momento.
     """
     h, w, _ = frame.shape
 
-    # Dimensiones del recuadro del pentagrama (arriba a la derecha)
     box_w = min(330, w - 20)
     box_h = 145
     x1 = w - box_w - 12
@@ -272,13 +273,11 @@ def dibujar_pentagrama(frame, ahora):
     x2 = w - 12
     y2 = y1 + box_h
 
-    # Fondo semitransparente tipo papel de partitura
     overlay = frame.copy()
     cv2.rectangle(overlay, (x1, y1), (x2, y2), (248, 246, 238), -1)
     cv2.addWeighted(overlay, 0.88, frame, 0.12, 0, frame)
     cv2.rectangle(frame, (x1, y1), (x2, y2), (60, 60, 60), 2)
 
-    # Título del pentagrama y notas activas
     notas_activas_nombres = [
         nombres_piano_por_dedo[i]
         for i in range(10)
@@ -287,36 +286,36 @@ def dibujar_pentagrama(frame, ahora):
     texto_titulo = "Pentagrama"
     if notas_activas_nombres:
         texto_titulo += f" - Tocando: {', '.join(notas_activas_nombres)}"
+    else:
+        texto_titulo += " (Standby)"
+
     cv2.putText(
         frame, texto_titulo, (x1 + 10, y1 + 20),
-        cv2.FONT_HERSHEY_SIMPLEX, 0.48, (30, 30, 30), 1, cv2.LINE_AA
+        cv2.FONT_HERSHEY_SIMPLEX, 0.46, (30, 30, 30), 1, cv2.LINE_AA
     )
 
-    # Geometría de las 5 líneas del pentagrama
     staff_left = x1 + 42
     staff_right = x2 - 14
     top_line_y = y1 + 38
-    line_spacing = 14          # Distancia entre líneas del pentagrama
-    half_step = line_spacing // 2  # 7 px entre línea y espacio
+    line_spacing = 14
+    half_step = line_spacing // 2
 
-    # Dibujar las 5 líneas horizontales del pentagrama (Línea 5 arriba -> Línea 1 abajo)
+    # 5 líneas del pentagrama
     for l_idx in range(5):
         ly = top_line_y + l_idx * line_spacing
         cv2.line(frame, (staff_left - 26, ly), (staff_right, ly), (50, 50, 50), 1, cv2.LINE_AA)
 
-    # Barras de compás al inicio y final del pentagrama
     bottom_line_y = top_line_y + 4 * line_spacing
     cv2.line(frame, (staff_left - 26, top_line_y), (staff_left - 26, bottom_line_y), (40, 40, 40), 2)
     cv2.line(frame, (staff_right, top_line_y), (staff_right, bottom_line_y), (40, 40, 40), 2)
 
-    # Símbolo estilizado de Clave de Sol al inicio
+    # Clave de Sol estilizada
     clef_x = staff_left - 14
     sol_line_y = top_line_y + 3 * line_spacing
     cv2.circle(frame, (clef_x, sol_line_y), 6, (40, 40, 40), 1, cv2.LINE_AA)
     cv2.line(frame, (clef_x + 3, top_line_y - 6), (clef_x - 2, bottom_line_y + 10), (40, 40, 40), 2, cv2.LINE_AA)
     cv2.circle(frame, (clef_x - 4, bottom_line_y + 10), 3, (40, 40, 40), -1, cv2.LINE_AA)
 
-    # Pasos verticales desde la 5ª línea (0) hasta Do4 (10)
     pasos_por_dedo = [10, 9, 8, 7, 6, 5, 4, 3, 2, 1]
     ancho_util = staff_right - staff_left - 16
 
@@ -327,7 +326,6 @@ def dibujar_pentagrama(frame, ahora):
         nombre_nota = nombres_piano_por_dedo[i]
         activa = (ahora - ultimo_trigger_visual.get(i, 0.0)) < DURACION_NOTA_VISUAL
 
-        # Guía tenue de las posiciones en el pentagrama
         if not activa:
             cv2.circle(frame, (nx, ny), 3, (175, 175, 175), -1, cv2.LINE_AA)
             cv2.putText(
@@ -335,21 +333,17 @@ def dibujar_pentagrama(frame, ahora):
                 cv2.FONT_HERSHEY_SIMPLEX, 0.34, (130, 130, 130), 1, cv2.LINE_AA
             )
         else:
-            # Si es Do central (i == 0, paso 10), dibujar la línea adicional inferior
             if i == 0:
                 cv2.line(frame, (nx - 12, ny), (nx + 12, ny), (30, 30, 30), 2, cv2.LINE_AA)
 
-            # Círculo destacado en la nota que se está tocando en ese momento
             cv2.circle(frame, (nx, ny), 8, (0, 210, 70), -1, cv2.LINE_AA)
             cv2.circle(frame, (nx, ny), 8, (15, 70, 20), 2, cv2.LINE_AA)
 
-            # Plica vertical de la figura musical
             if paso >= 4:
                 cv2.line(frame, (nx + 7, ny), (nx + 7, ny - 24), (15, 70, 20), 2, cv2.LINE_AA)
             else:
                 cv2.line(frame, (nx - 7, ny), (nx - 7, ny + 24), (15, 70, 20), 2, cv2.LINE_AA)
 
-            # Nombre de la nota resaltado
             cv2.putText(
                 frame, nombre_nota, (nx - 10, y2 - 7),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.44, (0, 150, 40), 2, cv2.LINE_AA
@@ -359,16 +353,17 @@ def dibujar_pentagrama(frame, ahora):
 # BUCLE PRINCIPAL
 # --------------------------
 def main():
-    global UMBRAL_MOV_REL
+    global UMBRAL_BAJADA_STANDBY, UMBRAL_VEL_DEDO
 
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
         print("No se puede abrir la cámara.")
         return
 
-    print("\n🎹 Piano con las Manos Activado (Do, Re, Mi, Fa, Sol, La, Si)")
-    print("• Coloca tu mano horizontal y baja un dedo para tocar su nota.")
-    print("• Controles: [+] más sensible | [-] menos sensible | [ESC] salir\n")
+    print("\n🎹 Piano con las Manos Activado — Modo Standby Inteligente")
+    print("• Si acuestas la mano, las notas quedan en Standby (sin dispararse solas).")
+    print("• Baja un dedo claramente hacia abajo para tocar esa nota.")
+    print("• Controles: [+] más sensible | [-] más firme (requiere bajar más el dedo) | [ESC] salir\n")
 
     while True:
         ret, frame = cap.read()
@@ -376,7 +371,6 @@ def main():
             print("Error leyendo frame.")
             break
 
-        # Vista espejo natural
         frame = cv2.flip(frame, 1)
         h, w, _ = frame.shape
 
@@ -385,12 +379,29 @@ def main():
         ahora = time.time()
 
         if results.multi_hand_landmarks:
-            tips = obtener_tips_ordenados(results, w, h)
+            tips, palmas = obtener_manos_estables(results, w, h)
 
-            # Procesar por cada mano (0..4 y 5..9)
-            for mano_offset in (0, 5):
-                indices_mano = range(mano_offset, mano_offset + 5)
-                dys_mano = {}
+            for mano_slot in (0, 1):
+                palma_actual = palmas[mano_slot]
+                if palma_actual is None:
+                    continue
+
+                # Medir cuánto se movió la mano entera (muñeca + nudillos)
+                mov_palma = 0.0
+                dy_palma = 0.0
+                if prev_palm_pos[mano_slot] is not None:
+                    dx_p = palma_actual[0] - prev_palm_pos[mano_slot][0]
+                    dy_p = palma_actual[1] - prev_palm_pos[mano_slot][1]
+                    mov_palma = float(np.hypot(dx_p, dy_p))
+                    dy_palma = dy_p
+                prev_palm_pos[mano_slot] = palma_actual
+
+                # Si el usuario está acomodando, rotando o acostando la mano entera,
+                # ponemos la mano en Standby y recalibramos la posición base de los dedos
+                mano_en_traslado = (mov_palma > MAX_MOV_PALMA)
+
+                indices_mano = range(mano_slot * 5, mano_slot * 5 + 5)
+                datos_dedos = {}
 
                 for i in indices_mano:
                     info = tips[i]
@@ -399,62 +410,86 @@ def main():
                         continue
 
                     y_norm = info["y_norm"]
-                    x_px = info["x_px"]
-                    y_px = info["y_px"]
+                    x_norm = info["x_norm"]
 
-                    # Suavizado EMA en X e Y
                     if prev_y[i] is None:
                         y_smooth = y_norm
-                        x_smooth = float(x_px)
+                        x_smooth = x_norm
+                        baseline_y[i] = y_norm
+                        frames_estables[i] = 0
                     else:
-                        y_smooth = alpha_smooth * y_norm + (1.0 - alpha_smooth) * prev_y[i]
-                        x_smooth = alpha_smooth * float(x_px) + (1.0 - alpha_smooth) * prev_x[i]
+                        # Zona muerta pequeña para ignorar vibraciones de cámara en Standby
+                        if abs(y_norm - prev_y[i]) < 0.003:
+                            y_smooth = prev_y[i]
+                        else:
+                            y_smooth = alpha_smooth * y_norm + (1.0 - alpha_smooth) * prev_y[i]
+                        x_smooth = alpha_smooth * x_norm + (1.0 - alpha_smooth) * prev_x[i]
 
                     hist_y[i].append(y_smooth)
 
-                    # Calcular bajada en 1 y 2 frames para detectar el toque al bajar un dedo
-                    dy_1 = (y_smooth - prev_y[i]) if prev_y[i] is not None else 0.0
-                    dy_2 = (y_smooth - hist_y[i][0]) * 0.65 if len(hist_y[i]) >= 2 else dy_1
-                    dy_dedo = max(dy_1, dy_2)
+                    if mano_en_traslado:
+                        # Mientras se acuesta o traslada la mano, actualizar Standby sin tocar
+                        baseline_y[i] = y_smooth
+                        frames_estables[i] = 0
+                    else:
+                        frames_estables[i] += 1
 
-                    dys_mano[i] = (dy_dedo, int(x_smooth), int(y_px), info["pip_px"])
+                    # Movimiento en ventana corta (3 frames) descontando el movimiento vertical de la palma
+                    dy_ventana = (y_smooth - hist_y[i][0]) if len(hist_y[i]) >= 2 else 0.0
+                    dy_neto = dy_ventana - max(0.0, dy_palma * len(hist_y[i]) * 0.85)
+
+                    # Si el dedo está quieto o subiendo, la línea de Standby lo sigue suavemente
+                    # para estar lista esperando a que el usuario baje el dedo
+                    if not dedo_presionado[i] and dy_neto < (UMBRAL_VEL_DEDO * 0.45):
+                        baseline_y[i] = 0.88 * baseline_y[i] + 0.12 * y_smooth
+                    elif y_smooth < baseline_y[i]:
+                        # Si el dedo sube más arriba de su nivel de Standby, actualizar el techo de Standby
+                        baseline_y[i] = y_smooth
+
+                    bajada_desde_standby = y_smooth - baseline_y[i]
+                    datos_dedos[i] = (dy_neto, bajada_desde_standby, int(x_smooth * w), int(y_smooth * h))
+
                     prev_y[i] = y_smooth
                     prev_x[i] = x_smooth
 
-                if not dys_mano:
+                if not datos_dedos:
                     continue
 
-                # Si toda la mano baja en bloque (los 5 dedos bajan juntos), restamos el mínimo
-                # para que acomodar la mano no dispare todas las notas a la vez.
-                # Pero si bajas 1 dedo (o varios) mientras al menos uno se mantiene, suena de inmediato.
-                valores_dy = [v[0] for v in dys_mano.values()]
-                bajada_comun_mano = max(0.0, min(valores_dy)) if len(valores_dy) >= 4 else 0.0
+                # Encontrar cuál es el dedo que más está bajando en esta mano
+                # (cuando la mano está acostada, evita que el temblor de dedos vecinos dispare notas)
+                max_bajada_mano = max(v[1] for v in datos_dedos.values())
 
-                for i, (dy_dedo, draw_x, draw_y, pip_px) in dys_mano.items():
-                    dy_efectivo = dy_dedo - bajada_comun_mano
+                for i, (dy_neto, bajada_desde_standby, draw_x, draw_y) in datos_dedos.items():
                     nombre_nota = nombres_piano_por_dedo[i]
 
-                    # Detectar bajada del dedo
-                    if not dedo_abajo[i]:
-                        if dy_efectivo > UMBRAL_MOV_REL:
-                            tocar_sonido_idx(i)
-                            dedo_abajo[i] = True
+                    if not dedo_presionado[i]:
+                        # Solo puede tocar si la mano ya se estabilizó en Standby (>= 4 frames quieta)
+                        # y el dedo bajó bastante desde su punto de Standby (bajada_desde_standby)
+                        # con velocidad descendente clara (dy_neto).
+                        es_dedo_dominante = (bajada_desde_standby >= max_bajada_mano * 0.75)
+                        if (
+                            not mano_en_traslado
+                            and frames_estables[i] >= 4
+                            and es_dedo_dominante
+                            and bajada_desde_standby > UMBRAL_BAJADA_STANDBY
+                            and dy_neto > UMBRAL_VEL_DEDO
+                        ):
+                            if tocar_sonido_idx(i):
+                                dedo_presionado[i] = True
                     else:
-                        # Liberar estado apenas el dedo deja de bajar
-                        if dy_dedo < (UMBRAL_MOV_REL * 0.35):
-                            dedo_abajo[i] = False
+                        # Para volver a estar en Standby y poder tocar otra vez,
+                        # el dedo debe subir de regreso hacia su posición de espera
+                        if bajada_desde_standby < (UMBRAL_BAJADA_STANDBY * 0.40) or dy_neto < -0.008:
+                            dedo_presionado[i] = False
+                            baseline_y[i] = prev_y[i]
 
-                    # Visualización limpia en cada punta de dedo (sin cruzar líneas en la palma)
-                    reciente = (ahora - ultimo_trigger_visual.get(i, 0.0)) < 0.28
+                    # Dibujar únicamente los 5 puntos limpios en las puntas y su nota de piano
+                    reciente = (ahora - ultimo_trigger_visual.get(i, 0.0)) < 0.30
                     color_circulo = (0, 230, 60) if reciente else (255, 90, 0)
 
-                    # Línea corta solo hacia la falange de ese mismo dedo para ver la articulación
-                    cv2.line(frame, pip_px, (draw_x, draw_y), (0, 230, 60) if reciente else (255, 200, 0), 2, cv2.LINE_AA)
-                    cv2.circle(frame, pip_px, 4, (0, 215, 255), -1, cv2.LINE_AA)
                     cv2.circle(frame, (draw_x, draw_y), 8, color_circulo, -1, cv2.LINE_AA)
                     cv2.circle(frame, (draw_x, draw_y), 8, (255, 255, 255), 1, cv2.LINE_AA)
 
-                    # Etiqueta con formato de piano (Do, Re, Mi, Fa, Sol, La, Si)
                     cv2.putText(
                         frame, nombre_nota,
                         (draw_x - 14, draw_y + 24),
@@ -462,20 +497,24 @@ def main():
                         (0, 255, 80) if reciente else (255, 255, 255), 2, cv2.LINE_AA
                     )
         else:
-            for i in range(10):
-                reset_finger(i)
+            reset_hand(0)
+            reset_hand(1)
 
-        # Dibujar siempre el pentagrama en la parte superior derecha
+        # Pentagrama arriba a la derecha
         dibujar_pentagrama(frame, ahora)
 
-        cv2.imshow("Piano Virtual - Mano Horizontal + Pentagrama", frame)
+        cv2.imshow("Piano Virtual - Mano en Standby + Pentagrama", frame)
         key = cv2.waitKey(1) & 0xFF
         if key == 27:  # ESC
             break
         elif key in (ord('+'), ord('=')):
-            UMBRAL_MOV_REL = max(0.006, UMBRAL_MOV_REL - 0.002)
+            # Más sensible (requiere bajar menos el dedo)
+            UMBRAL_BAJADA_STANDBY = max(0.018, UMBRAL_BAJADA_STANDBY - 0.004)
+            UMBRAL_VEL_DEDO = max(0.012, UMBRAL_VEL_DEDO - 0.002)
         elif key in (ord('-'), ord('_')):
-            UMBRAL_MOV_REL = min(0.040, UMBRAL_MOV_REL + 0.002)
+            # Más firme (requiere bajar más el dedo desde Standby)
+            UMBRAL_BAJADA_STANDBY = min(0.075, UMBRAL_BAJADA_STANDBY + 0.004)
+            UMBRAL_VEL_DEDO = min(0.045, UMBRAL_VEL_DEDO + 0.002)
 
     cap.release()
     cv2.destroyAllWindows()
