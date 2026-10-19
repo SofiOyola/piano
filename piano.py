@@ -356,6 +356,149 @@ def dibujar_pentagrama(frame, ahora):
             )
 
 # --------------------------
+# MENÚ DE INICIO (BOTÓN PIANO "START") Y BOTÓN "SALIR"
+# --------------------------
+estado_ui = {
+    "en_menu": True,
+    "salir": False,
+    "mouse_x": 0,
+    "mouse_y": 0,
+    "start_rect": (0, 0, 0, 0),  # (x1, y1, x2, y2)
+    "salir_rect": (0, 0, 0, 0),  # (x1, y1, x2, y2)
+}
+
+def punto_en_rect(px, py, rect):
+    x1, y1, x2, y2 = rect
+    return x1 <= px <= x2 and y1 <= py <= y2
+
+def mouse_callback(event, x, y, flags, param):
+    estado_ui["mouse_x"] = x
+    estado_ui["mouse_y"] = y
+    if event == cv2.EVENT_LBUTTONDOWN:
+        # Clic en botón Salir (abajo a la derecha)
+        if punto_en_rect(x, y, estado_ui["salir_rect"]):
+            estado_ui["salir"] = True
+            return
+        # Clic en botón START con forma de piano (cuando estamos en el menú)
+        if estado_ui["en_menu"] and punto_en_rect(x, y, estado_ui["start_rect"]):
+            estado_ui["en_menu"] = False
+            for i in range(10):
+                reset_finger(i)
+            tocar_sonido_idx(0)  # Sonido Do de bienvenida
+
+def dibujar_boton_salir(frame):
+    """
+    Dibuja el botón 'Salir' en la esquina inferior derecha de la pantalla.
+    """
+    h, w, _ = frame.shape
+    btn_w, btn_h = 115, 40
+    x1 = w - btn_w - 14
+    y1 = h - btn_h - 14
+    x2 = w - 14
+    y2 = h - 14
+    estado_ui["salir_rect"] = (x1, y1, x2, y2)
+
+    hover = punto_en_rect(estado_ui["mouse_x"], estado_ui["mouse_y"], estado_ui["salir_rect"])
+    color_fondo = (45, 45, 220) if hover else (35, 35, 175)
+
+    cv2.rectangle(frame, (x1, y1), (x2, y2), color_fondo, -1, cv2.LINE_AA)
+    cv2.rectangle(frame, (x1, y1), (x2, y2), (240, 240, 240), 2, cv2.LINE_AA)
+    cv2.putText(
+        frame, "Salir",
+        (x1 + 30, y1 + 27),
+        cv2.FONT_HERSHEY_SIMPLEX, 0.72, (255, 255, 255), 2, cv2.LINE_AA
+    )
+
+def dibujar_menu_inicio(frame):
+    """
+    Dibuja el menú inicial con un botón central de 'START' que tiene forma de piano.
+    """
+    h, w, _ = frame.shape
+
+    # Oscurecer suavemente el fondo del video para destacar el menú
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (0, 0), (w, h), (18, 18, 24), -1)
+    cv2.addWeighted(overlay, 0.65, frame, 0.35, 0, frame)
+
+    # Título superior
+    titulo = "PIANO VIRTUAL"
+    (tw, _), _ = cv2.getTextSize(titulo, cv2.FONT_HERSHEY_SIMPLEX, 1.2, 3)
+    cv2.putText(
+        frame, titulo,
+        ((w - tw) // 2, int(h * 0.22)),
+        cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 255), 3, cv2.LINE_AA
+    )
+
+    subtitulo = "Haz clic en el piano START para comenzar"
+    (sw, _), _ = cv2.getTextSize(subtitulo, cv2.FONT_HERSHEY_SIMPLEX, 0.60, 1)
+    cv2.putText(
+        frame, subtitulo,
+        ((w - sw) // 2, int(h * 0.29)),
+        cv2.FONT_HERSHEY_SIMPLEX, 0.60, (200, 230, 255), 1, cv2.LINE_AA
+    )
+
+    # Dimensiones del botón START con forma de piano (7 teclas blancas + 5 negras)
+    num_teclas_blancas = 7
+    ancho_tecla = 40
+    piano_w = num_teclas_blancas * ancho_tecla  # 280 px
+    piano_h = 145
+    px1 = (w - piano_w) // 2
+    py1 = (h - piano_h) // 2 + 15
+    px2 = px1 + piano_w
+    py2 = py1 + piano_h
+    estado_ui["start_rect"] = (px1 - 8, py1 - 18, px2 + 8, py2 + 8)
+
+    hover = punto_en_rect(estado_ui["mouse_x"], estado_ui["mouse_y"], estado_ui["start_rect"])
+
+    # Caja exterior del piano (madera/negro de piano con borde brillante al pasar el mouse)
+    color_borde_piano = (0, 230, 100) if hover else (80, 190, 255)
+    cv2.rectangle(frame, (px1 - 8, py1 - 18), (px2 + 8, py2 + 8), (25, 25, 25), -1, cv2.LINE_AA)
+    cv2.rectangle(frame, (px1 - 8, py1 - 18), (px2 + 8, py2 + 8), color_borde_piano, 3, cv2.LINE_AA)
+    # Filete clásico rojo/dorado sobre las teclas
+    cv2.line(frame, (px1, py1 - 3), (px2, py1 - 3), (40, 40, 180), 3, cv2.LINE_AA)
+
+    # 1. Dibujar las 7 teclas blancas
+    for k in range(num_teclas_blancas):
+        kx1 = px1 + k * ancho_tecla
+        kx2 = kx1 + ancho_tecla
+        color_blanca = (255, 255, 255) if not hover else (240, 255, 245)
+        cv2.rectangle(frame, (kx1 + 1, py1), (kx2 - 1, py2), color_blanca, -1, cv2.LINE_AA)
+        # Sombra inferior 3D de cada tecla blanca
+        cv2.rectangle(frame, (kx1 + 1, py2 - 10), (kx2 - 1, py2), (210, 210, 210), -1, cv2.LINE_AA)
+        cv2.rectangle(frame, (kx1, py1), (kx2, py2), (40, 40, 40), 1, cv2.LINE_AA)
+
+    # 2. Dibujar las 5 teclas negras (entre Do-Re, Re-Mi | Fa-Sol, Sol-La, La-Si)
+    ancho_negra = 24
+    alto_negra = int(piano_h * 0.56)
+    posiciones_negras = [0, 1, 3, 4, 5]
+    for k in posiciones_negras:
+        nx1 = px1 + (k + 1) * ancho_tecla - (ancho_negra // 2)
+        nx2 = nx1 + ancho_negra
+        ny2 = py1 + alto_negra
+        cv2.rectangle(frame, (nx1, py1), (nx2, ny2), (20, 20, 20), -1, cv2.LINE_AA)
+        cv2.rectangle(frame, (nx1 + 3, py1 + 4), (nx2 - 3, ny2 - 6), (55, 55, 55), 1, cv2.LINE_AA)
+
+    # 3. Placa central/inferior con el texto "START" sobre las teclas del piano
+    badge_w = 170
+    badge_h = 42
+    bx1 = (w - badge_w) // 2
+    by1 = py2 - badge_h - 14
+    bx2 = bx1 + badge_w
+    by2 = by1 + badge_h
+
+    color_badge = (0, 185, 70) if hover else (20, 30, 45)
+    cv2.rectangle(frame, (bx1, by1), (bx2, by2), color_badge, -1, cv2.LINE_AA)
+    cv2.rectangle(frame, (bx1, by1), (bx2, by2), (255, 255, 255), 2, cv2.LINE_AA)
+
+    txt_start = "START"
+    (stw, sth), _ = cv2.getTextSize(txt_start, cv2.FONT_HERSHEY_SIMPLEX, 0.95, 2)
+    cv2.putText(
+        frame, txt_start,
+        (bx1 + (badge_w - stw) // 2, by1 + (badge_h + sth) // 2 - 2),
+        cv2.FONT_HERSHEY_SIMPLEX, 0.95, (255, 255, 255), 2, cv2.LINE_AA
+    )
+
+# --------------------------
 # BUCLE PRINCIPAL
 # --------------------------
 def main():
@@ -366,11 +509,15 @@ def main():
         print("No se puede abrir la cámara.")
         return
 
-    print("\n🎹 Piano con las Manos Activado (Do, Re, Mi, Fa, Sol, La, Si)")
-    print("• Coloca tu mano horizontal y baja un dedo para tocar su nota.")
-    print("• Controles: [+] más sensible | [-] menos sensible | [ESC] salir\n")
+    nombre_ventana = "Piano Virtual - Mano Horizontal + Pentagrama"
+    cv2.namedWindow(nombre_ventana)
+    cv2.setMouseCallback(nombre_ventana, mouse_callback)
 
-    while True:
+    print("\n🎹 Piano con las Manos Activado (Do, Re, Mi, Fa, Sol, La, Si)")
+    print("• Haz clic en el botón de piano 'START' para iniciar.")
+    print("• Haz clic en el botón 'Salir' (abajo a la derecha) o presiona [ESC] para cerrar.\n")
+
+    while not estado_ui["salir"]:
         ret, frame = cap.read()
         if not ret:
             print("Error leyendo frame.")
@@ -379,99 +526,108 @@ def main():
         # Vista espejo natural
         frame = cv2.flip(frame, 1)
         h, w, _ = frame.shape
-
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        results = hands.process(rgb)
         ahora = time.time()
 
-        if results.multi_hand_landmarks:
-            tips = obtener_tips_ordenados(results, w, h)
+        if estado_ui["en_menu"]:
+            # Mostrar menú inicial con el botón START en forma de piano y el botón Salir
+            dibujar_menu_inicio(frame)
+            dibujar_boton_salir(frame)
+        else:
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            results = hands.process(rgb)
 
-            # Procesar por cada mano (0..4 y 5..9)
-            for mano_offset in (0, 5):
-                indices_mano = range(mano_offset, mano_offset + 5)
-                dys_mano = {}
+            if results.multi_hand_landmarks:
+                tips = obtener_tips_ordenados(results, w, h)
 
-                for i in indices_mano:
-                    info = tips[i]
-                    if info is None:
-                        reset_finger(i)
+                # Procesar por cada mano (0..4 y 5..9)
+                for mano_offset in (0, 5):
+                    indices_mano = range(mano_offset, mano_offset + 5)
+                    dys_mano = {}
+
+                    for i in indices_mano:
+                        info = tips[i]
+                        if info is None:
+                            reset_finger(i)
+                            continue
+
+                        y_norm = info["y_norm"]
+                        x_px = info["x_px"]
+                        y_px = info["y_px"]
+
+                        # Suavizado EMA en X e Y
+                        if prev_y[i] is None:
+                            y_smooth = y_norm
+                            x_smooth = float(x_px)
+                        else:
+                            y_smooth = alpha_smooth * y_norm + (1.0 - alpha_smooth) * prev_y[i]
+                            x_smooth = alpha_smooth * float(x_px) + (1.0 - alpha_smooth) * prev_x[i]
+
+                        hist_y[i].append(y_smooth)
+
+                        # Calcular bajada en 1 y 2 frames para detectar el toque al bajar un dedo
+                        dy_1 = (y_smooth - prev_y[i]) if prev_y[i] is not None else 0.0
+                        dy_2 = (y_smooth - hist_y[i][0]) * 0.65 if len(hist_y[i]) >= 2 else dy_1
+                        dy_dedo = max(dy_1, dy_2)
+
+                        dys_mano[i] = (dy_dedo, int(x_smooth), int(y_px), info["pip_px"])
+                        prev_y[i] = y_smooth
+                        prev_x[i] = x_smooth
+
+                    if not dys_mano:
                         continue
 
-                    y_norm = info["y_norm"]
-                    x_px = info["x_px"]
-                    y_px = info["y_px"]
+                    # Si toda la mano baja en bloque (los 5 dedos bajan juntos), restamos el mínimo
+                    # para que acomodar la mano no dispare todas las notas a la vez.
+                    # Pero si bajas 1 dedo (o varios) mientras al menos uno se mantiene, suena de inmediato.
+                    valores_dy = [v[0] for v in dys_mano.values()]
+                    bajada_comun_mano = max(0.0, min(valores_dy)) if len(valores_dy) >= 4 else 0.0
 
-                    # Suavizado EMA en X e Y
-                    if prev_y[i] is None:
-                        y_smooth = y_norm
-                        x_smooth = float(x_px)
-                    else:
-                        y_smooth = alpha_smooth * y_norm + (1.0 - alpha_smooth) * prev_y[i]
-                        x_smooth = alpha_smooth * float(x_px) + (1.0 - alpha_smooth) * prev_x[i]
+                    for i, (dy_dedo, draw_x, draw_y, pip_px) in dys_mano.items():
+                        dy_efectivo = dy_dedo - bajada_comun_mano
+                        nombre_nota = nombres_piano_por_dedo[i]
 
-                    hist_y[i].append(y_smooth)
+                        # Detectar bajada del dedo
+                        if not dedo_abajo[i]:
+                            if dy_efectivo > UMBRAL_MOV_REL:
+                                tocar_sonido_idx(i)
+                                dedo_abajo[i] = True
+                        else:
+                            # Liberar estado apenas el dedo deja de bajar
+                            if dy_dedo < (UMBRAL_MOV_REL * 0.35):
+                                dedo_abajo[i] = False
 
-                    # Calcular bajada en 1 y 2 frames para detectar el toque al bajar un dedo
-                    dy_1 = (y_smooth - prev_y[i]) if prev_y[i] is not None else 0.0
-                    dy_2 = (y_smooth - hist_y[i][0]) * 0.65 if len(hist_y[i]) >= 2 else dy_1
-                    dy_dedo = max(dy_1, dy_2)
+                        # Visualización limpia en cada punta de dedo (sin cruzar líneas en la palma)
+                        reciente = (ahora - ultimo_trigger_visual.get(i, 0.0)) < 0.28
+                        color_circulo = (0, 230, 60) if reciente else (255, 90, 0)
 
-                    dys_mano[i] = (dy_dedo, int(x_smooth), int(y_px), info["pip_px"])
-                    prev_y[i] = y_smooth
-                    prev_x[i] = x_smooth
+                        # Línea corta solo hacia la falange de ese mismo dedo para ver la articulación
+                        cv2.line(frame, pip_px, (draw_x, draw_y), (0, 230, 60) if reciente else (255, 200, 0), 2, cv2.LINE_AA)
+                        cv2.circle(frame, pip_px, 4, (0, 215, 255), -1, cv2.LINE_AA)
+                        cv2.circle(frame, (draw_x, draw_y), 8, color_circulo, -1, cv2.LINE_AA)
+                        cv2.circle(frame, (draw_x, draw_y), 8, (255, 255, 255), 1, cv2.LINE_AA)
 
-                if not dys_mano:
-                    continue
+                        # Etiqueta con formato de piano (Do, Re, Mi, Fa, Sol, La, Si)
+                        cv2.putText(
+                            frame, nombre_nota,
+                            (draw_x - 14, draw_y + 24),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.58,
+                            (0, 255, 80) if reciente else (255, 255, 255), 2, cv2.LINE_AA
+                        )
+            else:
+                for i in range(10):
+                    reset_finger(i)
 
-                # Si toda la mano baja en bloque (los 5 dedos bajan juntos), restamos el mínimo
-                # para que acomodar la mano no dispare todas las notas a la vez.
-                # Pero si bajas 1 dedo (o varios) mientras al menos uno se mantiene, suena de inmediato.
-                valores_dy = [v[0] for v in dys_mano.values()]
-                bajada_comun_mano = max(0.0, min(valores_dy)) if len(valores_dy) >= 4 else 0.0
+            # Dibujar siempre el pentagrama en la parte superior derecha
+            dibujar_pentagrama(frame, ahora)
+            # Dibujar el botón "Salir" en la parte inferior derecha
+            dibujar_boton_salir(frame)
 
-                for i, (dy_dedo, draw_x, draw_y, pip_px) in dys_mano.items():
-                    dy_efectivo = dy_dedo - bajada_comun_mano
-                    nombre_nota = nombres_piano_por_dedo[i]
-
-                    # Detectar bajada del dedo
-                    if not dedo_abajo[i]:
-                        if dy_efectivo > UMBRAL_MOV_REL:
-                            tocar_sonido_idx(i)
-                            dedo_abajo[i] = True
-                    else:
-                        # Liberar estado apenas el dedo deja de bajar
-                        if dy_dedo < (UMBRAL_MOV_REL * 0.35):
-                            dedo_abajo[i] = False
-
-                    # Visualización limpia en cada punta de dedo (sin cruzar líneas en la palma)
-                    reciente = (ahora - ultimo_trigger_visual.get(i, 0.0)) < 0.28
-                    color_circulo = (0, 230, 60) if reciente else (255, 90, 0)
-
-                    # Línea corta solo hacia la falange de ese mismo dedo para ver la articulación
-                    cv2.line(frame, pip_px, (draw_x, draw_y), (0, 230, 60) if reciente else (255, 200, 0), 2, cv2.LINE_AA)
-                    cv2.circle(frame, pip_px, 4, (0, 215, 255), -1, cv2.LINE_AA)
-                    cv2.circle(frame, (draw_x, draw_y), 8, color_circulo, -1, cv2.LINE_AA)
-                    cv2.circle(frame, (draw_x, draw_y), 8, (255, 255, 255), 1, cv2.LINE_AA)
-
-                    # Etiqueta con formato de piano (Do, Re, Mi, Fa, Sol, La, Si)
-                    cv2.putText(
-                        frame, nombre_nota,
-                        (draw_x - 14, draw_y + 24),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.58,
-                        (0, 255, 80) if reciente else (255, 255, 255), 2, cv2.LINE_AA
-                    )
-        else:
-            for i in range(10):
-                reset_finger(i)
-
-        # Dibujar siempre el pentagrama en la parte superior derecha
-        dibujar_pentagrama(frame, ahora)
-
-        cv2.imshow("Piano Virtual - Mano Horizontal + Pentagrama", frame)
+        cv2.imshow(nombre_ventana, frame)
         key = cv2.waitKey(1) & 0xFF
         if key == 27:  # ESC
             break
+        elif key in (13, 32) and estado_ui["en_menu"]:  # ENTER o ESPACIO también inician
+            estado_ui["en_menu"] = False
         elif key in (ord('+'), ord('=')):
             UMBRAL_MOV_REL = max(0.006, UMBRAL_MOV_REL - 0.002)
         elif key in (ord('-'), ord('_')):
